@@ -22,34 +22,15 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
+#include "config.h"
 
-// ============================================================================
-// CONFIGURATION
-// ============================================================================
+#ifdef USE_GNOME_IDLE
+#include "idle_detector_gnome.h"
+#else
+#include "idle_detector_libinput.h"
+#endif
 
-#define STATE_FILE      "/tmp/jigglemil.state"
-#define LOG_FILE        "/tmp/jigglemil.log"
-#define PID_FILE        "/tmp/jigglemil.pid"
 
-#define WARNING_LIMIT_MS    30000       // 30s  - red warning starts
-#define MIN_ACTION_MS       60000       // 60s  - minimum idle before action (30s red)
-#define MAX_ACTION_MS       120000      // 120s - maximum idle before action (90s red)
-#define CHECK_INTERVAL_SEC  1           // how often to check idle time
-
-// WindMouse parameters - randomized ranges for human-like variance
-#define MOUSE_SPEED_MIN     20.0
-#define MOUSE_SPEED_MAX     30.0
-#define GRAVITY_MIN         3.0
-#define GRAVITY_MAX         5.0
-#define WIND_MIN            6.0
-#define WIND_MAX            10.0
-#define TARGET_RADIUS_MIN   3.0
-#define TARGET_RADIUS_MAX   7.0
-#define MAX_STEP_MIN        2.0
-#define MAX_STEP_MAX        4.0
-#define MAX_PATH_POINTS     1500
-#define MIN_DELAY_US    5000
-#define MAX_DELAY_US    15000
 
 // ============================================================================
 // DATA STRUCTURES
@@ -182,36 +163,6 @@ void remove_pid(void) {
     unlink(PID_FILE);
 }
 
-// ============================================================================
-// IDLE TIME DETECTION (GNOME/Mutter)
-// ============================================================================
-
-long get_idle_time(void) {
-    FILE *fp = popen(
-        "gdbus call --session "
-        "--dest org.gnome.Mutter.IdleMonitor "
-        "--object-path /org/gnome/Mutter/IdleMonitor/Core "
-        "--method org.gnome.Mutter.IdleMonitor.GetIdletime 2>/dev/null",
-        "r"
-    );
-
-    if (!fp) return 0;
-
-    char buf[128];
-    long idle = 0;
-
-    if (fgets(buf, sizeof(buf), fp)) {
-        // Parse "(uint64 12345,)" format - find number after space
-        char *p = strstr(buf, " ");
-        if (p) {
-            p++;  // skip space
-            idle = strtol(p, NULL, 10);
-        }
-    }
-
-    pclose(fp);
-    return idle;
-}
 
 // ============================================================================
 // WINDMOUSE PATH GENERATOR (Pure function, no side effects)
@@ -417,7 +368,9 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Initialize
+    // Initialize idle detector
+    init_idle_detector();   // <-- NEW LINE
+
     srand(time(NULL) ^ getpid());
     setup_signals();
     save_pid();

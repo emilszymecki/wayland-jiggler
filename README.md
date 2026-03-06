@@ -104,7 +104,7 @@ jiggler --status
 
 ## Configuration
 
-Edit `src/jigglemil.c` and recompile:
+Edit `src/config.h` and recompile:
 
 ```c
 // Timing (ms)
@@ -144,14 +144,6 @@ sudo ./install.sh
 ```bash
 export YDOTOOL_SOCKET=/tmp/.ydotool_socket
 ydotool mousemove -- 50 50
-```
-
-### KDE/Sway support
-Currently GNOME only (uses `org.gnome.Mutter.IdleMonitor`).
-
-For KDE, replace idle detection with:
-```bash
-qdbus org.kde.screensaver /ScreenSaver GetSessionIdleTime
 ```
 
 ## License

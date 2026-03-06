@@ -12,6 +12,10 @@ echo -e "${GREEN}║   Jigglemil - Installation               ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
 echo
 
+# ============================================================================
+# STEP 0: Determine installation context
+# ============================================================================
+
 # Check root for system-wide install
 INSTALL_USER=0
 if [ "$EUID" -ne 0 ]; then
@@ -23,20 +27,56 @@ else
     PREFIX="/usr/local"
 fi
 
+# Detect user for adding to input group
+if [ "$SUDO_USER" ]; then
+    ACTUAL_USER="$SUDO_USER"
+else
+    ACTUAL_USER="$USER"
+fi
+
+# ============================================================================
+# STEP 0.5: Detect package manager
+# ============================================================================
+
+if command -v pacman &> /dev/null; then
+    PKG_MGR="pacman"
+    INSTALL_CMD="sudo pacman -S --needed --noconfirm"
+elif command -v apt &> /dev/null; then
+    PKG_MGR="apt"
+    INSTALL_CMD="sudo apt install -y"
+elif command -v dnf &> /dev/null; then
+    PKG_MGR="dnf"
+    INSTALL_CMD="sudo dnf install -y"
+elif command -v zypper &> /dev/null; then
+    PKG_MGR="zypper"
+    INSTALL_CMD="sudo zypper install -y"
+else
+    PKG_MGR=""
+    INSTALL_CMD=""
+fi
+
+if [ -z "$PKG_MGR" ]; then
+    echo -e "${RED}✗ No supported package manager detected.${NC}"
+    echo "  Please install dependencies manually."
+    exit 1
+else
+    echo -e "${GREEN}✓${NC} Detected package manager: $PKG_MGR"
+fi
+
 # ============================================================================
 # STEP 1: Dependencies
 # ============================================================================
 
 echo -e "${YELLOW}[1/4]${NC} Checking dependencies..."
 
-# Check GCC
+# Check GCC / build essentials
 if ! command -v gcc &> /dev/null; then
     echo -e "  ${RED}✗${NC} gcc not found"
     if [ "$INSTALL_USER" -eq 0 ]; then
-        echo "    Installing build-essential..."
-        apt-get update && apt-get install -y build-essential
+        echo "    Installing build tools..."
+        $INSTALL_CMD base-devel || $INSTALL_CMD build-essential
     else
-        echo -e "    ${RED}Please install gcc: sudo apt install build-essential${NC}"
+        echo -e "    ${RED}Please install gcc/make manually${NC}"
         exit 1
     fi
 else
@@ -45,23 +85,23 @@ fi
 
 # Check ydotool and find ydotoold path
 YDOTOOLD_BIN=""
-if [ -f "/usr/local/bin/ydotoold" ]; then
+if command -v ydotoold &> /dev/null; then
+    YDOTOOLD_BIN="$(command -v ydotoold)"
+    echo -e "  ${GREEN}✓${NC} ydotoold found ($YDOTOOLD_BIN)"
+elif [ -x "/usr/local/bin/ydotoold" ]; then
     YDOTOOLD_BIN="/usr/local/bin/ydotoold"
-    echo -e "  ${GREEN}✓${NC} ydotoold found (compiled: $YDOTOOLD_BIN)"
-elif [ -f "/usr/bin/ydotoold" ]; then
+    echo -e "  ${GREEN}✓${NC} ydotoold found ($YDOTOOLD_BIN)"
+elif [ -x "/usr/bin/ydotoold" ]; then
     YDOTOOLD_BIN="/usr/bin/ydotoold"
-    echo -e "  ${GREEN}✓${NC} ydotoold found (package: $YDOTOOLD_BIN)"
-elif command -v ydotoold &> /dev/null; then
-    YDOTOOLD_BIN="$(which ydotoold)"
     echo -e "  ${GREEN}✓${NC} ydotoold found ($YDOTOOLD_BIN)"
 else
     echo -e "  ${RED}✗${NC} ydotoold not found"
     if [ "$INSTALL_USER" -eq 0 ]; then
         echo "    Installing ydotool..."
-        apt-get update && apt-get install -y ydotool
+        $INSTALL_CMD ydotool
         YDOTOOLD_BIN="/usr/bin/ydotoold"
     else
-        echo -e "    ${RED}Please install ydotool: sudo apt install ydotool${NC}"
+        echo -e "    ${RED}Please install ydotool manually${NC}"
         exit 1
     fi
 fi
@@ -90,13 +130,26 @@ echo -e "${YELLOW}[2/4]${NC} Compiling..."
 
 cd "$(dirname "$0")"
 
-if [ -f "src/jigglemil.c" ]; then
-    gcc -Wall -Wextra -O2 -std=c11 -o jigglemil src/jigglemil.c -lm
-    echo -e "  ${GREEN}✓${NC} Compilation successful"
-else
+if [ ! -f "src/jigglemil.c" ]; then
     echo -e "  ${RED}✗${NC} src/jigglemil.c not found!"
     exit 1
 fi
+
+USE_GNOME_IDLE_FLAG=""
+
+# Check if libinput is available
+if pkg-config --exists libinput; then
+    echo -e "  ${GREEN}✓${NC} libinput detected - using libinput idle method"
+elif [ -e /dev/input/event0 ]; then
+    echo -e "  ${GREEN}✓${NC} /dev/input devices found - using libinput idle method"
+else
+    # fallback to GNOME idle detection
+    echo -e "  ${YELLOW}⚠ libinput not found - using GNOME idle method${NC}"
+    USE_GNOME_IDLE_FLAG="-DUSE_GNOME_IDLE"
+fi
+
+gcc -Wall -Wextra -O2 -std=c11 src/jigglemil.c -lm -linput -ludev $USE_GNOME_IDLE_FLAG -o jigglemil
+echo -e "  ${GREEN}✓${NC} Compilation successful"
 
 # ============================================================================
 # STEP 3: Install binary
@@ -108,8 +161,7 @@ echo -e "${YELLOW}[3/4]${NC} Installing binary..."
 if [ "$INSTALL_USER" -eq 0 ]; then
     install -Dm755 jigglemil "$PREFIX/bin/jigglemil"
 else
-    cp jigglemil "$PREFIX/bin/jigglemil"
-    chmod +x "$PREFIX/bin/jigglemil"
+    install -m755 jigglemil "$PREFIX/bin/jigglemil"
 fi
 echo -e "  ${GREEN}✓${NC} Installed to $PREFIX/bin/jigglemil"
 
@@ -121,8 +173,7 @@ if [ -f "jiggler" ]; then
     if [ "$INSTALL_USER" -eq 0 ]; then
         install -Dm755 jiggler "$PREFIX/bin/jiggler"
     else
-        cp jiggler "$PREFIX/bin/jiggler"
-        chmod +x "$PREFIX/bin/jiggler"
+        install -m755 jiggler "$PREFIX/bin/jiggler"
     fi
     echo -e "  ${GREEN}✓${NC} Wrapper installed to $PREFIX/bin/jiggler"
 fi
@@ -147,8 +198,8 @@ Type=simple
 Restart=always
 RestartSec=3
 ExecStart=$YDOTOOLD_BIN --socket-path=/tmp/.ydotool_socket
-ExecStartPost=/bin/sleep 1
-ExecStartPost=/bin/chmod 0666 /tmp/.ydotool_socket
+ExecStartPost=/usr/bin/sleep 1
+ExecStartPost=/usr/bin/chmod 0666 /tmp/.ydotool_socket
 
 [Install]
 WantedBy=multi-user.target
@@ -193,6 +244,21 @@ systemctl --user daemon-reload 2>/dev/null || true
 echo -e "  ${GREEN}✓${NC} User service installed: ~/.config/systemd/user/jigglemil.service"
 
 # ============================================================================
+# STEP 6: Ensure user is in 'input' group for libinput method
+# ============================================================================
+
+if [ -f "src/idle_detector_libinput.h" ]; then
+    echo -e "${YELLOW}[!]${NC} Libinput method detected, checking 'input' group..."
+    if id -nG "$ACTUAL_USER" | grep -qw "input"; then
+        echo -e "  ${GREEN}✓${NC} User '$ACTUAL_USER' is already in 'input' group"
+    else
+        echo -e "  ${YELLOW}⚠ User '$ACTUAL_USER' is not in 'input' group. Adding..."
+        sudo usermod -aG input "$ACTUAL_USER"
+        echo "    ✅ Added. Log out and log back in for changes to take effect."
+    fi
+fi
+
+# ============================================================================
 # DONE
 # ============================================================================
 
@@ -208,10 +274,13 @@ echo -e "  ${YELLOW}jiggler --toggle${NC}       # Toggle on/off (for shortcuts)"
 echo -e "  ${YELLOW}jiggler --status${NC}       # Show state (for Executor)"
 echo -e "  ${YELLOW}jiggler --watch${NC}        # Live dashboard"
 echo
-echo "GNOME Executor extension:"
-echo -e "  Command:     ${YELLOW}jiggler --status${NC}"
-echo -e "  Left Click:  ${YELLOW}jiggler --toggle${NC}"
-echo
+if [[ "$XDG_CURRENT_DESKTOP" =~ GNOME ]]; then
+    echo
+    echo "GNOME Executor extension:"
+    echo -e "  Command:     ${YELLOW}jiggler --status${NC}"
+    echo -e "  Left Click:  ${YELLOW}jiggler --toggle${NC}"
+    echo
+fi
 echo "Monitor:"
 echo -e "  ${YELLOW}tail -f /tmp/jigglemil.log${NC}           # Live logs"
 echo
