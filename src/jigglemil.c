@@ -50,6 +50,8 @@
 #define MAX_PATH_POINTS     1500
 #define MIN_DELAY_US    5000
 #define MAX_DELAY_US    15000
+#define ABORT_CHECK_INTERVAL 50          // check idle every N path points
+#define ABORT_IDLE_THRESH_MS 2000        // user is active if idle < 2s
 
 // ============================================================================
 // DATA STRUCTURES
@@ -310,16 +312,28 @@ void execute_path_batch(const MousePath *path) {
 
     char cmd[128];
     for (int i = 0; i < path->count && g_running; i++) {
+        if (i > 0 && (i % ABORT_CHECK_INTERVAL) == 0) {
+            if (get_idle_time() < ABORT_IDLE_THRESH_MS) {
+                log_msg("Path aborted: user active");
+                return;
+            }
+        }
         snprintf(cmd, sizeof(cmd), "ydotool mousemove -- %d %d",
                  path->points[i].dx, path->points[i].dy);
         system(cmd);
-        usleep(5000);  // 5ms between moves
+        usleep(5000);
     }
 }
 
 // Smooth mode: individual movements with delays (more human-like)
 void execute_path_smooth(const MousePath *path) {
     for (int i = 0; i < path->count && g_running; i++) {
+        if (i > 0 && (i % ABORT_CHECK_INTERVAL) == 0) {
+            if (get_idle_time() < ABORT_IDLE_THRESH_MS) {
+                log_msg("Path aborted: user active");
+                return;
+            }
+        }
         char dx_str[16], dy_str[16];
         snprintf(dx_str, sizeof(dx_str), "%d", path->points[i].dx);
         snprintf(dy_str, sizeof(dy_str), "%d", path->points[i].dy);
