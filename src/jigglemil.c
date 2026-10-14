@@ -20,8 +20,11 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <poll.h>
+#include <linux/input.h>
 
 // ============================================================================
 // CONFIGURATION
@@ -52,6 +55,7 @@
 #define MAX_DELAY_US    15000
 #define ABORT_CHECK_INTERVAL 50          // check idle every N path points
 #define ABORT_IDLE_THRESH_MS 2000        // user is active if idle < 2s
+#define MAX_KBD_FDS          8           // max keyboard devices to monitor
 
 // ============================================================================
 // DATA STRUCTURES
@@ -76,6 +80,9 @@ volatile sig_atomic_t g_running = 1;
 int g_smooth_mode = 0;
 int g_watch_mode = 0;
 
+static int g_kbd_fds[MAX_KBD_FDS];
+static int g_kbd_count = 0;
+
 // ============================================================================
 // SIGNAL HANDLING
 // ============================================================================
@@ -94,6 +101,78 @@ void setup_signals(void) {
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGHUP, &sa, NULL);
+}
+
+// ============================================================================
+// KEYBOARD MONITORING (/dev/input)
+// ============================================================================
+
+static int test_bit(const unsigned long *bits, int bit) {
+    return (int)((bits[bit / (8 * sizeof(long))] >> (bit % (8 * sizeof(long)))) & 1);
+}
+
+static int is_keyboard(int fd) {
+    unsigned long evbits[(EV_MAX + 8 * sizeof(long)) / (8 * sizeof(long))] = {0};
+    if (ioctl(fd, EVIOCGBIT(0, sizeof(evbits)), evbits) < 0) return 0;
+    if (!test_bit(evbits, EV_KEY)) return 0;
+
+    unsigned long keybits[(KEY_MAX + 8 * sizeof(long)) / (8 * sizeof(long))] = {0};
+    if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits) < 0) return 0;
+
+    return test_bit(keybits, KEY_A) && test_bit(keybits, KEY_Z);
+}
+
+void open_keyboards(void) {
+    g_kbd_count = 0;
+    for (int i = 0; i < 32 && g_kbd_count < MAX_KBD_FDS; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/dev/input/event%d", i);
+        int fd = open(path, O_RDONLY | O_NONBLOCK);
+        if (fd < 0) continue;
+        if (is_keyboard(fd)) {
+            g_kbd_fds[g_kbd_count++] = fd;
+        } else {
+            close(fd);
+        }
+    }
+}
+
+void close_keyboards(void) {
+    for (int i = 0; i < g_kbd_count; i++) {
+        close(g_kbd_fds[i]);
+    }
+    g_kbd_count = 0;
+}
+
+// Non-blocking check: returns 1 if any key was pressed since last call
+int keypress_detected(void) {
+    if (g_kbd_count == 0) return 0;
+
+    struct pollfd pfds[MAX_KBD_FDS];
+    for (int i = 0; i < g_kbd_count; i++) {
+        pfds[i].fd = g_kbd_fds[i];
+        pfds[i].events = POLLIN;
+    }
+    if (poll(pfds, (nfds_t)g_kbd_count, 0) <= 0) return 0;
+
+    int detected = 0;
+    struct input_event ev;
+    for (int i = 0; i < g_kbd_count; i++) {
+        while (read(g_kbd_fds[i], &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+            if (ev.type == EV_KEY && ev.value > 0)
+                detected = 1;
+        }
+    }
+    return detected;
+}
+
+// Drain any queued events without triggering an abort
+void drain_keyboard_events(void) {
+    struct input_event ev;
+    for (int i = 0; i < g_kbd_count; i++) {
+        while (read(g_kbd_fds[i], &ev, sizeof(ev)) == (ssize_t)sizeof(ev))
+            ;
+    }
 }
 
 // ============================================================================
@@ -310,11 +389,17 @@ static int exec_ydotool(char *const argv[]) {
 void execute_path_batch(const MousePath *path) {
     if (path->count == 0) return;
 
+    drain_keyboard_events();
+
     char cmd[128];
     for (int i = 0; i < path->count && g_running; i++) {
+        if (keypress_detected()) {
+            log_msg("Path aborted: keypress");
+            return;
+        }
         if (i > 0 && (i % ABORT_CHECK_INTERVAL) == 0) {
             if (get_idle_time() < ABORT_IDLE_THRESH_MS) {
-                log_msg("Path aborted: user active");
+                log_msg("Path aborted: user active (idle)");
                 return;
             }
         }
@@ -327,10 +412,16 @@ void execute_path_batch(const MousePath *path) {
 
 // Smooth mode: individual movements with delays (more human-like)
 void execute_path_smooth(const MousePath *path) {
+    drain_keyboard_events();
+
     for (int i = 0; i < path->count && g_running; i++) {
+        if (keypress_detected()) {
+            log_msg("Path aborted: keypress");
+            return;
+        }
         if (i > 0 && (i % ABORT_CHECK_INTERVAL) == 0) {
             if (get_idle_time() < ABORT_IDLE_THRESH_MS) {
-                log_msg("Path aborted: user active");
+                log_msg("Path aborted: user active (idle)");
                 return;
             }
         }
@@ -435,6 +526,7 @@ int main(int argc, char *argv[]) {
     srand(time(NULL) ^ getpid());
     setup_signals();
     save_pid();
+    open_keyboards();
 
     // Set ydotool socket path
     setenv("YDOTOOL_SOCKET", "/tmp/.ydotool_socket", 1);
@@ -452,6 +544,10 @@ int main(int argc, char *argv[]) {
     log_msg(g_smooth_mode ? "    Mode: SMOOTH" : "    Mode: BATCH");
 
     char msg[128];
+    snprintf(msg, sizeof(msg), "    Keyboards: %d", g_kbd_count);
+    log_msg(msg);
+    if (g_kbd_count == 0)
+        log_msg("    WARNING: no keyboard fds (add user to input group)");
     snprintf(msg, sizeof(msg), "    First trigger: %lds", action_limit / 1000);
     log_msg(msg);
     log_msg("═══════════════════════════════════════");
@@ -517,6 +613,7 @@ int main(int argc, char *argv[]) {
 
     save_state("⚫");
     remove_pid();
+    close_keyboards();
     notify("Jigglemil", "Stopped");
 
     return 0;
